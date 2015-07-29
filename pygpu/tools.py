@@ -67,36 +67,13 @@ class ScalarArg(Argument):
     def spec(self):
         return self.dtype
 
-def check_contig(args):
-    dims = None
-    c_contig = f_contig = True
-    offsets = []
-    for arg in args:
-        if not isinstance(arg, GpuArray):
-            offsets.append(None)
-            continue
-
-        if dims is None:
-            dims = arg.shape
-            n = arg.size
-        elif arg.shape != dims:
-            return None, None, False
-        offsets.append(arg.offset)
-        fl = arg.flags
-        c_contig = c_contig and fl['C_CONTIGUOUS']
-        f_contig = f_contig and fl['F_CONTIGUOUS']
-    if not (c_contig or f_contig):
-        return None, None, False
-    return n, tuple(offsets), True
 
 def check_args(args, collapse=False, broadcast=False):
     """
     Returns the properties of arguments and checks if they all match
     (are all the same shape)
 
-    If `collapse` is True dimension collapsing will be performed.
-    If `collapse` is None dimension collapsing will be performed if
-    some arguments are non-contiguous.
+    If `collapse` is True (or None) dimension collapsing will be performed.
     If `collapse` is False dimension collapsing will not be performed.
 
     If `broadcast` is True array broadcasting will be performed which
@@ -104,80 +81,88 @@ def check_args(args, collapse=False, broadcast=False):
     others will be repeated to match the size of the other arrays.
     If `broadcast` is False no broadcasting takes place.
     """
+
+    dims = None
+    c_contig = f_contig = True
     strs = []
     offsets = []
-    array0 = None
     for arg in args:
-        if isinstance(arg, GpuArray):
-            strs.append(arg.strides)
-            offsets.append(arg.offset)
-            if array0 is None: array0 = arg
-        else:
+        if not isinstance(arg, GpuArray):
             strs.append(None)
             offsets.append(None)
+            continue
 
-    if array0 is None:
+        shp = arg.shape
+        fl = arg.flags
+
+        if dims is None:
+            dims = shp
+            n = arg.size
+            nd = len(dims)
+        elif shp != dims:
+            c_contig = f_contig = False
+            if len(shp) != len(dims):
+                raise ValueError("Array order differs")
+            if not broadcast:
+                raise ValueError("Array shape differs")
+
+        strs.append(arg.strides)
+        offsets.append(arg.offset)
+
+        c_contig = c_contig and fl['C_CONTIGUOUS']
+        f_contig = f_contig and fl['F_CONTIGUOUS']
+
+    if dims is None:
         raise TypeError("No arrays in kernel arguments, "
                         "something is wrong")
-    n = array0.size
-    nd = array0.ndim
-    dims = array0.shape
-    tdims = dims
-    c_contig = True
-    f_contig = True
+
+    contig = c_contig or f_contig
+
+    if contig:
+        if c_contig and collapse:
+            nd = 1
+            dims = (n,)
+            strs = tuple(s[-1:] if s is not None else None for s in strs)
+        else:
+            strs = tuple(strs)
+        return n, nd, dims, strs, tuple(offsets), True
+
+    if collapse is None:
+        collapse = True
 
     if broadcast or collapse:
         # make the strides and dims editable
+        tdims = dims
         dims = list(dims)
         strs = [list(str) if str is not None else str for str in strs]
 
-    if broadcast and 1 in dims:
+    if broadcast:
         # Get the full shape in dims (no ones unless all arrays have it).
+        if 1 in dims:
+            for i, ary in enumerate(args):
+                if strs[i] is None:
+                    continue
+                shp = ary.shape
+                for i, d in enumerate(shp):
+                    if dims[i] != d and dims[i] == 1:
+                        dims[i] = d
+                        n *= d
+            tdims = tuple(dims)
+
         for i, ary in enumerate(args):
             if strs[i] is None:
                 continue
             shp = ary.shape
-            if len(dims) != len(shp):
-                raise ValueError("Array order differs")
-            for i, d in enumerate(shp):
-                if dims[i] != d and dims[i] == 1:
-                    dims[i] = d
-                    n *= d
-        tdims = tuple(dims)
-
-    for i, ary in enumerate(args):
-        if strs[i] is None:
-            continue
-        fl = ary.flags
-        shp = ary.shape
-        c_contig = c_contig and fl['C_CONTIGUOUS']
-        f_contig = f_contig and fl['F_CONTIGUOUS']
-        if tdims != shp:
-            if broadcast:
-                if len(shp) != len(dims):
-                    raise ValueError("Array order differs")
+            if tdims != shp:
                 for j, d in enumerate(shp):
                     if dims[j] != d:
                         # Might want to add a per-dimension enable mechanism
                         if d == 1:
                             strs[i][j] = 0
-                            c_contig = False
-                            f_contig = False
                         else:
                             raise ValueError("Array shape differs")
-            else:
-                raise ValueError("Array shape differs")
 
-    contig = c_contig or f_contig
-
-    if not contig and collapse is None:
-        # make the strides and dims editable if needed
-        if type(dims) is not list:
-            dims = list(dims)
-            strs = [list(str) if str is not None else str for str in strs]
-        collapse = True
-
-    if nd > 1 and collapse:
+    if collapse and nd > 1:
         # remove dimensions that are of size 1
         for i in range(nd-1, -1, -1):
             if nd > 1 and dims[i] == 1:

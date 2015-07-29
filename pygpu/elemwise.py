@@ -2,7 +2,7 @@ from mako.template import Template
 
 import numpy
 
-from .tools import ScalarArg, ArrayArg, as_argument, check_contig, check_args, lfu_cache
+from .tools import ScalarArg, ArrayArg, as_argument, check_args, lfu_cache
 from .dtypes import (parse_c_arg_backend, dtype_to_ctype, get_np_obj,
                      get_common_dtype)
 from . import gpuarray
@@ -428,13 +428,12 @@ class ElemwiseKernel(object):
         return k, args
 
     def select_kernel(self, args, collapse=None, broadcast=False):
-        n, offsets, contig = check_contig(args)
-        if contig:
-            return (self.contig_k, self.prepare_args_contig(args, n, offsets)), n
-
         n, nd, dims, strs, offsets, contig = check_args(args,
                                                         collapse=collapse,
                                                         broadcast=broadcast)
+
+        if contig:
+            return (self.contig_k, self.prepare_args_contig(args, n, offsets)), n
 
         try:
             return self.try_specialized(args, n, nd, dims, strs, offsets), n
@@ -482,7 +481,7 @@ class ElemwiseKernel(object):
             k(*args, n=n)
 
     def call_contig(self, *args):
-        n, offsets, contig = check_contig(args)
+        n, nd, dims, strs, offsets, contig = check_args(args, **kwargs)
         if not contig:
             raise ValueError("Can't call contig on non-contiguous data")
         if n != 0:
