@@ -7,6 +7,7 @@
 
 #include <assert.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include <cache.h>
 
@@ -25,6 +26,12 @@
 /* No returned allocations will be smaller than this size.
    Also, they will be aligned to this size. */
 #define FRAG_SIZE (64)
+
+static int verbose = 1;
+static size_t bytes_allocated = 0, bytes_used = 0;
+void print_stats(void) {
+  fprintf(stderr, "allocated=%ld used=%ld\n", bytes_allocated, bytes_used);
+}
 
 static CUresult err;
 
@@ -410,6 +417,11 @@ static int allocate(cuda_context *ctx, gpudata **res, gpudata **prev,
     cuda_exit(ctx);
     return GA_IMPL_ERROR;
   }
+  if (verbose) {
+    bytes_allocated += size;
+    fprintf(stderr, "allocate free block of %ld bytes: ", size);
+    print_stats();
+  }
 
   *res = new_gpudata(ctx, ptr, size);
 
@@ -511,6 +523,12 @@ static gpudata *cuda_alloc(gpucontext *c, size_t size, void *data, int flags,
   }
 
   err = extract(res, prev, asize);
+  if (verbose) {
+    bytes_used += asize;
+    fprintf(stderr, "get %ld from freelist: ", asize);
+    print_stats();
+  }
+
   if (err != GA_NO_ERROR)
     FAIL(NULL, err);
   /* It's out of the freelist, so add a ref */
@@ -566,6 +584,11 @@ static void cuda_free(gpudata *d) {
         prev = next;
       }
       next = prev != NULL ? prev->next : d->ctx->freeblocks;
+      if (verbose) {
+	bytes_used -= d->sz;
+	fprintf(stderr, "return %ld to freelist: ", d->sz);
+	print_stats();
+      }
 
       /* See if we can merge the block with the previous one */
       if (!(d->flags & CUDA_HEAD_ALLOC) &&
